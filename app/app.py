@@ -67,39 +67,11 @@ import pandas as pd
 import streamlit as st
 import shap
 
-# ==========================================================
-# TRUST SCHOOL PRIORITY TOOL — Policy-grade prototype
-# ----------------------------------------------------------
-# Fixes included:
-#  - Streamlit containers (border=True) for reliable “bubbles”
-#  - Simple RAG (red/amber/green) circle status (no confusing bars)
-#  - Scenario builder uses targets (attendance %, PTR) + SEND intensity
-#  - Sliders capped to p05–p95 ranges (benchmarks)
-#  - Robust session_state usage (no widget default warnings)
-#  - Robust defaults so NameError never occurs on reruns
-#  - Reset Scenario implemented correctly (reset-flag pattern)
-#  - SEND intervention grid-search supports classifier + regressor (mode flag)
-# ==========================================================
 
 # ==========================================================
-# Configuration
-# ==========================================================
-#
-# This section defines the file paths used by the dashboard.
-#
-# Required artefacts:
-# - processed modelling panel
-# - cached source data
-# - trained classifier/regressor artefacts
-# - saved feature lists
-#
-# If reproducing this tool on another machine, update these
-# paths before running the script.
-# ==========================================================
-
-# -----------------------------
 # CONFIG
-# -----------------------------
+# ==========================================================
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 DATA_DIR = PROJECT_ROOT / "data" / "processed"
@@ -119,17 +91,26 @@ OVER_FEATURES_PATH = MODEL_DIR / "overperf_model_features.joblib"
 DELTA_MODEL_PATH = MODEL_DIR / "delta_xgb_model.joblib"
 DELTA_FEATURES_PATH = MODEL_DIR / "delta_model_features.joblib"
 
+GREEN_MAX = 0.40
+AMBER_MAX = 0.60
+P8_MAE_BAND = 0.21
+
+
 # ==========================================================
-# Styling
-# ==========================================================
-#
-# This section defines lightweight CSS used for visual
-# presentation only. It does not affect modelling logic.
+# STREAMLIT PAGE SETUP
 # ==========================================================
 
-# -----------------------------
-# STYLE
-# -----------------------------
+st.set_page_config(
+    page_title="Trust School Priority Tool",
+    page_icon="🧭",
+    layout="wide"
+)
+
+
+# ==========================================================
+# STYLING
+# ==========================================================
+
 st.markdown(
     """
     <style>
@@ -150,31 +131,16 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
 # ==========================================================
-# Helper Functions
-# ==========================================================
-#
-# These helper functions support:
-# - value clamping
-# - RAG risk banding
-# - feature matrix construction
-# - probability prediction
-# - school-name lookup
-# - SHAP driver extraction
-# - scenario manipulation
-# - text briefing generation
-#
-# They are written to keep the main application logic readable
-# and to make the dashboard behaviour easier to audit.
+# HELPER FUNCTIONS
 # ==========================================================
 
-# -----------------------------
-# HELPERS
-# -----------------------------
 def clamp(v: float, lo: float, hi: float) -> float:
     if pd.isna(v):
         return v
     return float(max(lo, min(hi, v)))
+
 
 def band_prob(p: float) -> str:
     if p < GREEN_MAX:
@@ -183,23 +149,33 @@ def band_prob(p: float) -> str:
         return "MEDIUM"
     return "HIGH"
 
+
 def rag_colour(level: str) -> str:
-    return {"LOW": "🟢", "MEDIUM": "🟠", "HIGH": "🔴"}.get(level, "⚪")
+    return {
+        "LOW": "🟢",
+        "MEDIUM": "🟠",
+        "HIGH": "🔴"
+    }.get(level, "⚪")
+
 
 def build_X(row: pd.Series, feature_list: list[str]) -> pd.DataFrame:
     X = pd.DataFrame([{f: row.get(f, np.nan) for f in feature_list}])
     return X.apply(pd.to_numeric, errors="coerce")
 
+
 def predict_prob(model, X: pd.DataFrame) -> float:
     return float(model.predict_proba(X)[0, 1])
+
 
 def _read_csv_minimal(path: str) -> pd.DataFrame:
     try:
         df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
     except UnicodeDecodeError:
         df = pd.read_csv(path, encoding="latin1", low_memory=False)
+
     df.columns = [c.upper().strip() for c in df.columns]
     return df
+
 
 @st.cache_data
 def build_urn_name_lookup(panel_urns: np.ndarray) -> dict[int, str]:
@@ -214,28 +190,44 @@ def build_urn_name_lookup(panel_urns: np.ndarray) -> dict[int, str]:
     mapping: dict[int, str] = {}
 
     patterns = [
-    str(RAW_FOLDER / "*school_information*.csv"),
-    str(PROCESSED_FOLDER / "*school_information*.csv"),
-    str(RAW_FOLDER / "*spine*.csv"),
-    str(PROCESSED_FOLDER / "*spine*.csv"),
-]
+        str(RAW_FOLDER / "*school_information*.csv"),
+        str(PROCESSED_FOLDER / "*school_information*.csv"),
+        str(RAW_FOLDER / "*spine*.csv"),
+        str(PROCESSED_FOLDER / "*spine*.csv"),
+    ]
+
     files = []
     for p in patterns:
         files.extend(glob.glob(p))
 
-    possible_name_cols = ["SCHOOLNAME", "ESTABLISHMENTNAME", "NAME", "SCHNAME", "ESTABLISHMENT_NAME"]
-    possible_urn_cols = ["URN", "SCHOOL_URN"]
+    possible_name_cols = [
+        "SCHOOLNAME",
+        "ESTABLISHMENTNAME",
+        "NAME",
+        "SCHNAME",
+        "ESTABLISHMENT_NAME"
+    ]
+
+    possible_urn_cols = [
+        "URN",
+        "SCHOOL_URN"
+    ]
 
     for f in sorted(set(files)):
         try:
             df = _read_csv_minimal(f)
             urn_col = next((c for c in possible_urn_cols if c in df.columns), None)
             name_col = next((c for c in possible_name_cols if c in df.columns), None)
+
             if not urn_col or not name_col:
                 continue
 
             tmp = df[[urn_col, name_col]].copy()
-            tmp.rename(columns={urn_col: "URN_FINAL", name_col: "SCHOOL_NAME"}, inplace=True)
+            tmp.rename(
+                columns={urn_col: "URN_FINAL", name_col: "SCHOOL_NAME"},
+                inplace=True
+            )
+
             tmp["URN_FINAL"] = pd.to_numeric(tmp["URN_FINAL"], errors="coerce")
             tmp = tmp.dropna(subset=["URN_FINAL"])
             tmp["URN_FINAL"] = tmp["URN_FINAL"].astype(int)
@@ -246,6 +238,7 @@ def build_urn_name_lookup(panel_urns: np.ndarray) -> dict[int, str]:
             for u, n in zip(tmp["URN_FINAL"], tmp["SCHOOL_NAME"]):
                 if u not in mapping:
                     mapping[u] = n
+
         except Exception:
             continue
 
@@ -253,17 +246,24 @@ def build_urn_name_lookup(panel_urns: np.ndarray) -> dict[int, str]:
         try:
             with open(MASTER_CACHE_PATH, "rb") as fh:
                 cache = pickle.load(fh)
+
             for key in ["school_info", "spine"]:
                 if key in cache and isinstance(cache[key], pd.DataFrame):
                     df = cache[key].copy()
                     df.columns = [c.upper().strip() for c in df.columns]
-                    urn_col = next((c for c in ["URN", "SCHOOL_URN"] if c in df.columns), None)
+
+                    urn_col = next((c for c in possible_urn_cols if c in df.columns), None)
                     name_col = next((c for c in possible_name_cols if c in df.columns), None)
+
                     if not urn_col or not name_col:
                         continue
 
                     tmp = df[[urn_col, name_col]].copy()
-                    tmp.rename(columns={urn_col: "URN_FINAL", name_col: "SCHOOL_NAME"}, inplace=True)
+                    tmp.rename(
+                        columns={urn_col: "URN_FINAL", name_col: "SCHOOL_NAME"},
+                        inplace=True
+                    )
+
                     tmp["URN_FINAL"] = pd.to_numeric(tmp["URN_FINAL"], errors="coerce")
                     tmp = tmp.dropna(subset=["URN_FINAL"])
                     tmp["URN_FINAL"] = tmp["URN_FINAL"].astype(int)
@@ -274,19 +274,23 @@ def build_urn_name_lookup(panel_urns: np.ndarray) -> dict[int, str]:
                     for u, n in zip(tmp["URN_FINAL"], tmp["SCHOOL_NAME"]):
                         if u not in mapping:
                             mapping[u] = n
+
         except Exception:
             pass
 
     return mapping
 
+
 def display_label(u: int, name_map: dict[int, str]) -> str:
     nm = name_map.get(int(u), "")
     return f"{nm} ({u})" if nm else f"URN {u}"
+
 
 def parse_urn_from_display(s: str) -> int:
     if s.startswith("URN "):
         return int(s.split("URN ")[1].strip())
     return int(s.rsplit("(", 1)[1].replace(")", "").strip())
+
 
 def theme_for_feature(f: str) -> str:
     """
@@ -295,6 +299,7 @@ def theme_for_feature(f: str) -> str:
     explanation.
     """
     fu = f.upper()
+
     if "ABSENCE" in fu:
         return "Attendance"
     if "PTR" in fu or "TEACHER" in fu:
@@ -305,7 +310,9 @@ def theme_for_feature(f: str) -> str:
         return "SEND"
     if fu.startswith("PNUM") or fu.startswith("NUM"):
         return "Pupil cohort / Context"
+
     return "Other"
+
 
 def top3_drivers(explainer, X: pd.DataFrame, feature_list: list[str]) -> pd.DataFrame:
     """
@@ -314,49 +321,77 @@ def top3_drivers(explainer, X: pd.DataFrame, feature_list: list[str]) -> pd.Data
     and recommendation logic shown in the dashboard.
     """
     sv = explainer.shap_values(X)
+
     if isinstance(sv, list) and len(sv) == 2:
         vals = sv[1][0]
     else:
         arr = np.array(sv)
         vals = arr[0, :, 1] if arr.ndim == 3 else arr[0, :]
-    df = pd.DataFrame({"feature": feature_list, "abs": np.abs(vals), "signed": vals})
+
+    df = pd.DataFrame({
+        "feature": feature_list,
+        "abs": np.abs(vals),
+        "signed": vals
+    })
+
     return df.sort_values("abs", ascending=False).head(3).reset_index(drop=True)
 
+
 @st.cache_data
-def compute_feature_benchmarks(panel: pd.DataFrame, features: list[str]) -> dict[str, dict[str, float]]:
+def compute_feature_benchmarks(
+    panel: pd.DataFrame,
+    features: list[str]
+) -> dict[str, dict[str, float]]:
     """
     Compute percentile-based benchmark ranges for selected
     features. These are used to cap scenario sliders and
     prevent unrealistic user inputs.
     """
-    b = {}
+    benchmarks = {}
+
     for f in features:
         if f in panel.columns:
             s = pd.to_numeric(panel[f], errors="coerce")
+
             if s.notna().sum() > 200:
-                b[f] = {
+                benchmarks[f] = {
                     "p05": float(s.quantile(0.05)),
                     "p25": float(s.quantile(0.25)),
                     "p50": float(s.quantile(0.50)),
                     "p75": float(s.quantile(0.75)),
                     "p95": float(s.quantile(0.95)),
                 }
-    return b
 
-def apply_basic_levers(X: pd.DataFrame, absence_delta_pp: float, ptr_delta: float) -> pd.DataFrame:
+    return benchmarks
+
+
+def apply_basic_levers(
+    X: pd.DataFrame,
+    absence_delta_pp: float,
+    ptr_delta: float
+) -> pd.DataFrame:
     """
-    Apply simple scenario changes to attendance and pupil-
-    teacher ratio. These are deterministic feature edits used
-    for what-if simulation only.
+    Apply simple scenario changes to attendance and pupil-teacher
+    ratio. These are deterministic feature edits used for
+    what-if simulation only.
     """
     X2 = X.copy()
+
     if "ABSENCE_RATE" in X2.columns and pd.notna(X2.at[0, "ABSENCE_RATE"]):
-        X2.at[0, "ABSENCE_RATE"] = max(0.0, float(X2.at[0, "ABSENCE_RATE"]) - float(absence_delta_pp))
+        X2.at[0, "ABSENCE_RATE"] = max(
+            0.0,
+            float(X2.at[0, "ABSENCE_RATE"]) - float(absence_delta_pp)
+        )
+
     if "PTR" in X2.columns and pd.notna(X2.at[0, "PTR"]):
-        X2.at[0, "PTR"] = max(1.0, float(X2.at[0, "PTR"]) - float(ptr_delta))
+        X2.at[0, "PTR"] = max(
+            1.0,
+            float(X2.at[0, "PTR"]) - float(ptr_delta)
+        )
+
     return X2
 
-# ----- MODE-FLAG helper -----
+
 def model_score(model, X: pd.DataFrame, mode: str) -> float:
     """
     Helper used by scenario grid search.
@@ -369,9 +404,12 @@ def model_score(model, X: pd.DataFrame, mode: str) -> float:
         if not hasattr(model, "predict_proba"):
             raise TypeError("mode='min_prob' requires predict_proba().")
         return float(model.predict_proba(X)[0, 1])
+
     if mode == "max_pred":
         return -float(model.predict(X)[0])
+
     raise ValueError(f"Unknown mode: {mode}")
+
 
 def apply_send_intervention_grid(
     model,
@@ -396,16 +434,20 @@ def apply_send_intervention_grid(
     base_score = model_score(model, X2, mode)
 
     candidates = []
+
     for _, r in drivers_df.iterrows():
         f = str(r["feature"])
+
         if ("SEN" in f.upper() or "EHCP" in f.upper()) and f in X2.columns:
             candidates.append(f)
 
     if len(candidates) < max_send_features:
         for f in X2.columns:
             fu = f.upper()
+
             if ("SEN" in fu or "EHCP" in fu) and f not in candidates:
                 candidates.append(f)
+
             if len(candidates) >= max_send_features:
                 break
 
@@ -421,19 +463,23 @@ def apply_send_intervention_grid(
             continue
 
         cur = pd.to_numeric(X2.at[0, feat], errors="coerce")
+
         if pd.isna(cur):
             continue
 
         lo = benchmarks[feat].get("p05", np.nan)
         hi = benchmarks[feat].get("p95", np.nan)
+
         if not np.isfinite(lo) or not np.isfinite(hi) or abs(hi - lo) < eps:
             continue
 
         grid = np.linspace(lo, hi, grid_points)
+
         for v in grid:
             Xt = X2.copy()
             Xt.at[0, feat] = float(v)
             s = model_score(model, Xt, mode)
+
             if s < best_score:
                 best_score = s
                 best_feat = feat
@@ -442,6 +488,7 @@ def apply_send_intervention_grid(
     if best_feat is None or best_value is None:
         fallback_feat = candidates[0]
         cur = pd.to_numeric(X2.at[0, fallback_feat], errors="coerce")
+
         return X2, fallback_feat, (float(cur) if pd.notna(cur) else None), None, 0.0
 
     cur = float(pd.to_numeric(X2.at[0, best_feat], errors="coerce"))
@@ -455,9 +502,10 @@ def apply_send_intervention_grid(
     else:
         base_pred = float(model.predict(X)[0])
         new_pred = float(model.predict(X2)[0])
-        delta_display = (new_pred - base_pred)
+        delta_display = new_pred - base_pred
 
     return X2, best_feat, cur, best_value, float(delta_display)
+
 
 def risk_circle_component(p: float, label: str) -> None:
     """
@@ -465,8 +513,10 @@ def risk_circle_component(p: float, label: str) -> None:
     """
     p = float(np.clip(p, 0.0, 1.0))
     level = band_prob(p)
+
     st.markdown(f"**{label}**")
-    st.markdown(f"{rag_colour(level)} **{level}** ({p*100:.0f}%)")
+    st.markdown(f"{rag_colour(level)} **{level}** ({p * 100:.0f}%)")
+
 
 def action_playbook(theme: str) -> dict:
     """
@@ -475,6 +525,7 @@ def action_playbook(theme: str) -> dict:
     discussion, not direct recommendations from a causal model.
     """
     theme = theme.strip()
+
     if theme == "Attendance":
         return {
             "why": "Attendance is directly actionable and strongly associated with outcomes.",
@@ -485,6 +536,7 @@ def action_playbook(theme: str) -> dict:
             ],
             "owner": "Attendance lead / Pastoral"
         }
+
     if theme == "Workforce / Capacity":
         return {
             "why": "Capacity affects teaching quality and ability to deliver targeted support.",
@@ -495,34 +547,38 @@ def action_playbook(theme: str) -> dict:
             ],
             "owner": "Headteacher / HR / Ops"
         }
+
     if theme == "SEND":
         return {
             "why": "Identification and provision quality can shift outcomes for vulnerable learners.",
             "actions": [
                 "SENCO-led provision audit: needs → plan → delivery → review.",
-                "Check support is consistent in classrooms (not only on paper).",
+                "Check support is consistent in classrooms, not only on paper.",
                 "Train staff on adaptive teaching and structured scaffolding."
             ],
             "owner": "SENCO / Inclusion"
         }
+
     if theme == "Disadvantage":
         return {
             "why": "Disadvantage is a key contextual risk factor; mitigation is targeted support.",
             "actions": [
                 "Prioritise tutoring and high-impact interventions for disadvantaged pupils.",
-                "Improve homework access (study clubs, devices, quiet spaces).",
+                "Improve homework access through study clubs, devices, or quiet spaces.",
                 "Review progress half-termly and adjust intensity quickly."
             ],
             "owner": "Pupil Premium lead"
         }
+
     return {
         "why": "This factor influences the forecast, but may be less directly controllable.",
         "actions": [
-            "Use Evidence to review underlying driver feature(s).",
-            "Prioritise attendance, SEND provision, and staffing where possible.",
+            "Use the Evidence tab to review underlying driver feature(s).",
+            "Prioritise attendance, SEND provision, and staffing where possible."
         ],
         "owner": "Leadership team"
     }
+
 
 def make_briefing_text(
     school_name: str,
@@ -545,46 +601,40 @@ def make_briefing_text(
     Build a plain-text briefing summary for export.
     """
     lines = []
+
     lines.append("Trust School Priority Briefing (Decision Support)")
     lines.append(f"School: {school_name} (URN {urn})")
     lines.append(f"Latest year in panel: {int(year_latest) if pd.notna(year_latest) else 'Unknown'}")
     lines.append("")
     lines.append("Summary (model estimates)")
-    lines.append(f"- Priority estimate (before): {p_under_base*100:.0f}% [{band_prob(p_under_base)}]")
-    lines.append(f"- Priority estimate (after scenario): {p_under_scn*100:.0f}% [{band_prob(p_under_scn)}]")
-    lines.append(f"- Chance of exceeding expected progress (before): {p_over_base*100:.0f}%")
-    lines.append(f"- Chance of exceeding expected progress (after scenario): {p_over_scn*100:.0f}%")
+    lines.append(f"- Priority estimate (before): {p_under_base * 100:.0f}% [{band_prob(p_under_base)}]")
+    lines.append(f"- Priority estimate (after scenario): {p_under_scn * 100:.0f}% [{band_prob(p_under_scn)}]")
+    lines.append(f"- Chance of exceeding expected progress (before): {p_over_base * 100:.0f}%")
+    lines.append(f"- Chance of exceeding expected progress (after scenario): {p_over_scn * 100:.0f}%")
     lines.append("")
-    lines.append("Scenario inputs (before → after)")
+    lines.append("Scenario inputs (before to after)")
+
     if att_before is not None and att_after is not None and pd.notna(att_before) and pd.notna(att_after):
-        lines.append(f"- Attendance: {att_before:.1f}% → {att_after:.1f}%")
+        lines.append(f"- Attendance: {att_before:.1f}% to {att_after:.1f}%")
+
     if ptr_before is not None and ptr_after is not None and pd.notna(ptr_before) and pd.notna(ptr_after):
-        lines.append(f"- PTR: {ptr_before:.2f} → {ptr_after:.2f}")
+        lines.append(f"- PTR: {ptr_before:.2f} to {ptr_after:.2f}")
+
     if send_feat_used and send_before is not None and send_after is not None and pd.notna(send_before) and pd.notna(send_after):
-        lines.append(f"- SEND driver adjusted ({send_feat_used}): {send_before:.2f} → {send_after:.2f}")
+        lines.append(f"- SEND driver adjusted ({send_feat_used}): {send_before:.2f} to {send_after:.2f}")
+
     lines.append("")
     lines.append(f"Recommended focus area: {primary_focus}")
     lines.append("")
     lines.append("Note: This is a what-if tool. It estimates sensitivity, not guaranteed causal impact.")
+
     return "\n".join(lines)
 
+
 # ==========================================================
-# Load Models and Data
-# ==========================================================
-#
-# These cached loading functions initialise:
-# - trained classification/regression artefacts
-# - feature lists
-# - SHAP explainers
-# - the final modelling panel
-#
-# Streamlit caching is used to avoid repeated expensive loads
-# during reruns.
+# LOAD MODELS AND DATA
 # ==========================================================
 
-# -----------------------------
-# LOAD MODELS + DATA
-# -----------------------------
 @st.cache_resource
 def load_models():
     """
@@ -597,14 +647,16 @@ def load_models():
     Optional:
     - delta regressor and its feature list
     """
-    for pth, label in [
+    required = [
         (UNDER_MODEL_PATH, "underperformance model"),
         (UNDER_FEATURES_PATH, "underperformance feature list"),
         (OVER_MODEL_PATH, "overperformance model"),
         (OVER_FEATURES_PATH, "overperformance feature list"),
-    ]:
-        if not os.path.exists(pth):
-            raise FileNotFoundError(f"Missing {label}: {pth}")
+    ]
+
+    for path, label in required:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing {label}: {path}")
 
     under_model = joblib.load(UNDER_MODEL_PATH)
     under_feats = joblib.load(UNDER_FEATURES_PATH)
@@ -616,14 +668,26 @@ def load_models():
 
     delta_model = None
     delta_feats = None
+
     if os.path.exists(DELTA_MODEL_PATH) and os.path.exists(DELTA_FEATURES_PATH):
         try:
             delta_model = joblib.load(DELTA_MODEL_PATH)
             delta_feats = joblib.load(DELTA_FEATURES_PATH)
         except Exception:
-            delta_model, delta_feats = None, None
+            delta_model = None
+            delta_feats = None
 
-    return under_model, under_feats, under_expl, over_model, over_feats, over_expl, delta_model, delta_feats
+    return (
+        under_model,
+        under_feats,
+        under_expl,
+        over_model,
+        over_feats,
+        over_expl,
+        delta_model,
+        delta_feats
+    )
+
 
 @st.cache_data
 def load_panel():
@@ -633,14 +697,28 @@ def load_panel():
     """
     if not os.path.exists(PANEL_PATH):
         raise FileNotFoundError(f"Missing panel file: {PANEL_PATH}")
+
     df = pd.read_parquet(PANEL_PATH)
+
     df["URN_FINAL"] = pd.to_numeric(df["URN_FINAL"], errors="coerce")
     df = df.dropna(subset=["URN_FINAL"])
     df["URN_FINAL"] = df["URN_FINAL"].astype(int)
     df["YEAR_START"] = pd.to_numeric(df.get("YEAR_START", np.nan), errors="coerce")
+
     return df
 
-under_model, under_feats, under_expl, over_model, over_feats, over_expl, delta_model, delta_feats = load_models()
+
+(
+    under_model,
+    under_feats,
+    under_expl,
+    over_model,
+    over_feats,
+    over_expl,
+    delta_model,
+    delta_feats
+) = load_models()
+
 panel = load_panel()
 
 urns = np.array(sorted(panel["URN_FINAL"].unique().tolist()), dtype=int)
@@ -649,17 +727,11 @@ display_options = [display_label(u, name_map) for u in urns]
 
 bench_under = compute_feature_benchmarks(panel, under_feats)
 
-# ==========================================================
-# Header
-# ==========================================================
-#
-# User-facing introduction to the dashboard. This makes clear
-# that the tool is intended for decision support, not certainty.
-# ==========================================================
 
 # ==========================================================
 # HEADER
 # ==========================================================
+
 st.markdown("## 🧭 Trust School Priority Tool")
 st.markdown(
     "<div class='kicker'>A decision-support prototype to help prioritise support and test plausible scenarios. "
@@ -667,52 +739,47 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ==========================================================
-# Safe Defaults
-# ==========================================================
-#
-# Default values are set before widget rendering so the app can
-# rerun safely without NameError or stale-state failures.
-# ==========================================================
 
 # ==========================================================
-# SAFE DEFAULTS (avoid NameError on reruns)
+# SAFE DEFAULTS
 # ==========================================================
+
 absence_delta_pp = 0.0
 ptr_delta = 0.0
 send_strength = float(st.session_state.get("send_strength", 0.0))
 selected_urn = None
 
-# ==========================================================
-# Sidebar Inputs
-# ==========================================================
-#
-# The sidebar controls:
-# - school selection
-# - attendance target
-# - PTR target
-# - SEND scenario intensity
-#
-# All scenario controls are bounded using empirical percentile
-# ranges to avoid unrealistic values.
-# ==========================================================
 
 # ==========================================================
-# SIDEBAR — Inputs only
+# SIDEBAR INPUTS
 # ==========================================================
+
 with st.sidebar:
     st.markdown("### School")
-    search = st.text_input("Search school name or URN", value="", key="search_school")
+
+    search = st.text_input(
+        "Search school name or URN",
+        value="",
+        key="search_school"
+    )
 
     filtered = display_options
+
     if search.strip():
         q = search.strip().lower()
         filtered = [opt for opt in display_options if q in opt.lower()]
+
         if not filtered:
             st.warning("No matches. Showing full list.")
             filtered = display_options
 
-    selected_display = st.selectbox("Select school", filtered, index=0, key="selected_school")
+    selected_display = st.selectbox(
+        "Select school",
+        filtered,
+        index=0,
+        key="selected_school"
+    )
+
     selected_urn = parse_urn_from_display(selected_display)
 
     school_rows_tmp = panel[panel["URN_FINAL"] == int(selected_urn)].sort_values("YEAR_START")
@@ -725,27 +792,31 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Scenario builder (what-if)")
 
-    # ---- caps (calculated before widgets) ----
     att_min, att_max = 80.0, 100.0
+
     if "ABSENCE_RATE" in bench_under:
         lo_abs = bench_under["ABSENCE_RATE"].get("p05", np.nan)
         hi_abs = bench_under["ABSENCE_RATE"].get("p95", np.nan)
+
         if np.isfinite(lo_abs) and np.isfinite(hi_abs):
             att_min = float(clamp(100.0 - hi_abs, 0.0, 100.0))
             att_max = float(clamp(100.0 - lo_abs, 0.0, 100.0))
+
             if att_min > att_max:
                 att_min, att_max = att_max, att_min
 
     ptr_min, ptr_max = 10.0, 35.0
+
     if "PTR" in bench_under:
         lo_ptr = bench_under["PTR"].get("p05", np.nan)
         hi_ptr = bench_under["PTR"].get("p95", np.nan)
+
         if np.isfinite(lo_ptr) and np.isfinite(hi_ptr):
             ptr_min = float(max(1.0, lo_ptr))
             ptr_max = float(max(ptr_min + 0.5, hi_ptr))
 
-    # ---- school-change reset (must happen BEFORE widgets) ----
     last_urn = st.session_state.get("last_urn", None)
+
     if last_urn != selected_urn:
         if pd.notna(att_base):
             st.session_state["att_target"] = float(clamp(att_base, att_min, att_max))
@@ -761,7 +832,6 @@ with st.sidebar:
         st.session_state["last_urn"] = selected_urn
         st.session_state["do_reset"] = False
 
-    # ---- scenario reset flag (must happen BEFORE widgets) ----
     if st.session_state.get("do_reset", False):
         if pd.notna(att_base):
             st.session_state["att_target"] = float(clamp(att_base, att_min, att_max))
@@ -776,22 +846,29 @@ with st.sidebar:
         st.session_state["send_strength"] = 0.0
         st.session_state["do_reset"] = False
 
-    # ---- ensure defaults exist (still BEFORE widgets) ----
     if pd.notna(att_base):
         if "att_target" not in st.session_state or not np.isfinite(st.session_state["att_target"]):
             st.session_state["att_target"] = float(clamp(att_base, att_min, att_max))
-        st.session_state["att_target"] = float(clamp(st.session_state["att_target"], att_min, att_max))
+
+        st.session_state["att_target"] = float(
+            clamp(st.session_state["att_target"], att_min, att_max)
+        )
 
     if pd.notna(ptr_base):
         if "ptr_target" not in st.session_state or not np.isfinite(st.session_state["ptr_target"]):
             st.session_state["ptr_target"] = float(clamp(ptr_base, ptr_min, ptr_max))
-        st.session_state["ptr_target"] = float(clamp(st.session_state["ptr_target"], ptr_min, ptr_max))
+
+        st.session_state["ptr_target"] = float(
+            clamp(st.session_state["ptr_target"], ptr_min, ptr_max)
+        )
 
     if "send_strength" not in st.session_state or not np.isfinite(st.session_state["send_strength"]):
         st.session_state["send_strength"] = 0.0
-    st.session_state["send_strength"] = float(clamp(st.session_state["send_strength"], 0.0, 1.0))
 
-    # ---- widgets (after all state writes) ----
+    st.session_state["send_strength"] = float(
+        clamp(st.session_state["send_strength"], 0.0, 1.0)
+    )
+
     if pd.notna(att_base):
         att_target = st.slider(
             "Attendance target (%)",
@@ -817,13 +894,17 @@ with st.sidebar:
         ptr_target = np.nan
 
     st.markdown("**SEND support intensity (what-if)**")
+
     b1, b2, b3 = st.columns(3)
+
     if b1.button("Minor", use_container_width=True):
         st.session_state["send_strength"] = 0.25
         st.rerun()
+
     if b2.button("Moderate", use_container_width=True):
         st.session_state["send_strength"] = 0.60
         st.rerun()
+
     if b3.button("Intensive", use_container_width=True):
         st.session_state["send_strength"] = 1.00
         st.rerun()
@@ -836,115 +917,125 @@ with st.sidebar:
         key="send_strength",
     )
 
-    # ALWAYS define deltas (avoid NameError)
     absence_delta_pp = 0.0
+
     if pd.notna(att_base) and pd.notna(att_target) and pd.notna(abs_base):
         abs_target = 100.0 - float(att_target)
         absence_delta_pp = max(0.0, float(abs_base) - float(abs_target))
 
     ptr_delta = 0.0
+
     if pd.notna(ptr_base) and pd.notna(ptr_target):
         ptr_delta = max(0.0, float(ptr_base) - float(ptr_target))
 
     affects_att = "ABSENCE_RATE" in under_feats
     affects_ptr = "PTR" in under_feats
-    st.caption(f"Model sensitivity: Attendance={'Yes' if affects_att else 'No'} | PTR={'Yes' if affects_ptr else 'No'}")
 
-    # Reset button (flag pattern — safe)
+    st.caption(
+        f"Model sensitivity: Attendance={'Yes' if affects_att else 'No'} | "
+        f"PTR={'Yes' if affects_ptr else 'No'}"
+    )
+
     if st.button("Reset scenario", use_container_width=True):
         st.session_state["do_reset"] = True
         st.rerun()
 
-# ==========================================================
-# Main Scoring Logic
-# ==========================================================
-#
-# This section:
-# - selects the latest row for the chosen school
-# - builds model input matrices
-# - generates baseline predictions
-# - extracts local SHAP drivers
-# - applies scenario adjustments
-# - recomputes scenario predictions
-#
-# These are local school-level estimates, not institution-wide
-# model retraining steps.
-# ==========================================================
 
 # ==========================================================
-# MAIN — Model scoring for selected school
+# MAIN SCORING LOGIC
 # ==========================================================
+
 school_rows = panel[panel["URN_FINAL"] == int(selected_urn)].sort_values("YEAR_START")
 latest = school_rows.iloc[-1]
+
 school_name = name_map.get(int(selected_urn), f"URN {selected_urn}")
 year_latest = latest.get("YEAR_START", np.nan)
 
-# Baseline X
 X_under_base = build_X(latest, under_feats)
-X_over_base = build_X(latest, joblib.load(OVER_FEATURES_PATH))
+X_over_base = build_X(latest, over_feats)
 
-# Models
-over_model = joblib.load(OVER_MODEL_PATH)
-
-# Baseline preds
 p_under_base = predict_prob(under_model, X_under_base)
 p_over_base = predict_prob(over_model, X_over_base)
 
-# Drivers (baseline)
 drivers = top3_drivers(under_expl, X_under_base, under_feats)
 
-# Scenario: actionable levers first
 X_under_scn = apply_basic_levers(X_under_base, absence_delta_pp, ptr_delta)
 X_over_scn = apply_basic_levers(X_over_base, absence_delta_pp, ptr_delta)
 
-# SEND intervention (classifier: minimise probability)
 X_under_scn, send_feat_used, send_cur, send_best, send_delta_display = apply_send_intervention_grid(
-    under_model, X_under_scn, send_strength, drivers, bench_under, mode="min_prob"
+    under_model,
+    X_under_scn,
+    send_strength,
+    drivers,
+    bench_under,
+    mode="min_prob"
 )
 
-# Mirror SEND shift to overperformance model if possible
-if (send_feat_used is not None) and (send_best is not None) and (send_feat_used in X_over_scn.columns):
+if (
+    send_feat_used is not None
+    and send_best is not None
+    and send_feat_used in X_over_scn.columns
+):
     cur_over = pd.to_numeric(X_over_scn.at[0, send_feat_used], errors="coerce")
+
     if pd.notna(cur_over):
         applied = float(cur_over + send_strength * (send_best - float(cur_over)))
         X_over_scn.at[0, send_feat_used] = applied
 
-# Scenario preds
 p_under_scn = predict_prob(under_model, X_under_scn)
 p_over_scn = predict_prob(over_model, X_over_scn)
 
-# Human-readable before/after
-abs_before = pd.to_numeric(X_under_base.get("ABSENCE_RATE", pd.Series([np.nan])).iloc[0], errors="coerce") if "ABSENCE_RATE" in X_under_base.columns else np.nan
-abs_after = pd.to_numeric(X_under_scn.get("ABSENCE_RATE", pd.Series([np.nan])).iloc[0], errors="coerce") if "ABSENCE_RATE" in X_under_scn.columns else np.nan
+abs_before = (
+    pd.to_numeric(X_under_base.get("ABSENCE_RATE", pd.Series([np.nan])).iloc[0], errors="coerce")
+    if "ABSENCE_RATE" in X_under_base.columns
+    else np.nan
+)
+
+abs_after = (
+    pd.to_numeric(X_under_scn.get("ABSENCE_RATE", pd.Series([np.nan])).iloc[0], errors="coerce")
+    if "ABSENCE_RATE" in X_under_scn.columns
+    else np.nan
+)
+
 att_before = clamp(100.0 - abs_before, 0.0, 100.0) if pd.notna(abs_before) else np.nan
 att_after = clamp(100.0 - abs_after, 0.0, 100.0) if pd.notna(abs_after) else np.nan
 
-ptr_before = pd.to_numeric(X_under_base.get("PTR", pd.Series([np.nan])).iloc[0], errors="coerce") if "PTR" in X_under_base.columns else np.nan
-ptr_after = pd.to_numeric(X_under_scn.get("PTR", pd.Series([np.nan])).iloc[0], errors="coerce") if "PTR" in X_under_scn.columns else np.nan
+ptr_before = (
+    pd.to_numeric(X_under_base.get("PTR", pd.Series([np.nan])).iloc[0], errors="coerce")
+    if "PTR" in X_under_base.columns
+    else np.nan
+)
+
+ptr_after = (
+    pd.to_numeric(X_under_scn.get("PTR", pd.Series([np.nan])).iloc[0], errors="coerce")
+    if "PTR" in X_under_scn.columns
+    else np.nan
+)
 
 send_before = np.nan
 send_after = np.nan
-if (send_feat_used is not None) and (send_feat_used in X_under_base.columns) and (send_feat_used in X_under_scn.columns):
+
+if (
+    send_feat_used is not None
+    and send_feat_used in X_under_base.columns
+    and send_feat_used in X_under_scn.columns
+):
     send_before = pd.to_numeric(X_under_base.at[0, send_feat_used], errors="coerce")
     send_after = pd.to_numeric(X_under_scn.at[0, send_feat_used], errors="coerce")
 
+
 # ==========================================================
-# Optional P8 Forecast Band
-# ==========================================================
-#
-# If the delta regressor is available, the dashboard also
-# derives an approximate projected next-year P8 band by:
-# - predicting delta P8
-# - adding the lagged P8 value
-# - displaying a band around the estimate using approximate MAE
-#
-# This is an optional interpretive aid, not the primary risk
-# output of the dashboard.
+# OPTIONAL P8 FORECAST BAND
 # ==========================================================
 
-# Optional: P8 band forecast via delta model
-def forecast_p8_band(delta_model, delta_feats, latest_row: pd.Series, X_delta_scn: pd.DataFrame | None):
+def forecast_p8_band(
+    delta_model,
+    delta_feats,
+    latest_row: pd.Series,
+    X_delta_scn: pd.DataFrame | None
+):
     lag = pd.to_numeric(latest_row.get("TARGET_P8_LAG1", np.nan), errors="coerce")
+
     if pd.isna(lag):
         lag = pd.to_numeric(latest_row.get("TARGET_P8", np.nan), errors="coerce")
 
@@ -952,6 +1043,7 @@ def forecast_p8_band(delta_model, delta_feats, latest_row: pd.Series, X_delta_sc
         return None, None, None, None
 
     Xb = build_X(latest_row, delta_feats)
+
     try:
         d_hat = float(delta_model.predict(Xb)[0])
     except Exception:
@@ -965,43 +1057,49 @@ def forecast_p8_band(delta_model, delta_feats, latest_row: pd.Series, X_delta_sc
             d_hat_s = float(delta_model.predict(X_delta_scn)[0])
             p8_hat_s = float(lag + d_hat_s)
             band_s = (p8_hat_s - P8_MAE_BAND, p8_hat_s + P8_MAE_BAND)
+
             return p8_hat, band, p8_hat_s, band_s
+
         except Exception:
             pass
 
     return p8_hat, band, None, None
 
+
 p8_base = band_base = p8_scn = band_scn = None
+
 if delta_model is not None and delta_feats is not None:
     bench_delta = compute_feature_benchmarks(panel, delta_feats)
     X_delta_base = build_X(latest, delta_feats)
     X_delta_scn = apply_basic_levers(X_delta_base, absence_delta_pp, ptr_delta)
 
-    # regressor: maximise prediction
     X_delta_scn, _, _, _, _ = apply_send_intervention_grid(
-        delta_model, X_delta_scn, send_strength, drivers, bench_delta, mode="max_pred"
+        delta_model,
+        X_delta_scn,
+        send_strength,
+        drivers,
+        bench_delta,
+        mode="max_pred"
     )
-    p8_base, band_base, p8_scn, band_scn = forecast_p8_band(delta_model, delta_feats, latest, X_delta_scn)
 
-theme_counts = pd.Series([theme_for_feature(str(r["feature"])) for _, r in drivers.iterrows()]).value_counts()
+    p8_base, band_base, p8_scn, band_scn = forecast_p8_band(
+        delta_model,
+        delta_feats,
+        latest,
+        X_delta_scn
+    )
+
+theme_counts = pd.Series(
+    [theme_for_feature(str(r["feature"])) for _, r in drivers.iterrows()]
+).value_counts()
+
 primary_focus = theme_counts.index[0] if len(theme_counts) else "Improvement"
 
-# ==========================================================
-# Main User Interface
-# ==========================================================
-#
-# The dashboard exposes three user-facing tabs:
-# - Overview
-# - Actions
-# - Evidence
-#
-# These balance accessibility for school leaders with
-# transparency for dissertation/examiner review.
-# ==========================================================
 
 # ==========================================================
-# MAIN UI
+# MAIN USER INTERFACE
 # ==========================================================
+
 st.markdown(
     f"<span class='pill'><b>{school_name}</b> (URN {int(selected_urn)})</span>"
     f"<span class='pill'>Latest year: <b>{int(year_latest) if pd.notna(year_latest) else 'Unknown'}</b></span>",
@@ -1014,14 +1112,9 @@ tab_overview, tab_actions, tab_evidence = st.tabs(
 
 
 with tab_overview:
-    """
-    Overview tab:
-    Presents baseline and scenario-adjusted risk estimates,
-    optional projected P8 bands, and exportable leadership
-    briefing text.
-    """
     level_base = band_prob(p_under_base)
     level_scn = band_prob(p_under_scn)
+
     risk_change_pp = (p_under_scn - p_under_base) * 100.0
     over_change_pp = (p_over_scn - p_over_base) * 100.0
 
@@ -1032,47 +1125,63 @@ with tab_overview:
             f"(based on patterns in similar schools and prior outcomes)."
         )
         st.info(f"**Recommended focus area:** {primary_focus}")
-        st.caption("This is decision support (sensitivity), not a guarantee. Use alongside local knowledge.")
+        st.caption("This is decision support, not a guarantee. Use alongside local knowledge.")
 
     c1, c2 = st.columns(2, gap="large")
+
     with c1:
         with st.container(border=True):
             st.markdown("### Current outlook")
-            risk_circle_component(p_under_base, "Priority estimate (likelihood of underperformance)")
-            st.metric("Priority estimate", f"{p_under_base*100:.0f}%")
-            st.metric("Chance of exceeding expected progress", f"{p_over_base*100:.0f}%")
+            risk_circle_component(
+                p_under_base,
+                "Priority estimate (likelihood of underperformance)"
+            )
+            st.metric("Priority estimate", f"{p_under_base * 100:.0f}%")
+            st.metric("Chance of exceeding expected progress", f"{p_over_base * 100:.0f}%")
             st.caption(f"Status: {rag_colour(level_base)} {level_base}")
 
     with c2:
         with st.container(border=True):
             st.markdown("### With your scenario")
-            risk_circle_component(p_under_scn, "Priority estimate (scenario)")
+            risk_circle_component(
+                p_under_scn,
+                "Priority estimate (scenario)"
+            )
             st.metric(
                 "Priority estimate (scenario)",
-                f"{p_under_scn*100:.0f}%",
+                f"{p_under_scn * 100:.0f}%",
                 delta=f"{risk_change_pp:+.0f}pp",
                 delta_color="inverse"
             )
             st.metric(
                 "Chance of exceeding expected progress (scenario)",
-                f"{p_over_scn*100:.0f}%",
+                f"{p_over_scn * 100:.0f}%",
                 delta=f"{over_change_pp:+.0f}pp",
             )
             st.caption(f"Status: {rag_colour(level_scn)} {level_scn}")
 
     with st.container(border=True):
         st.markdown("### Optional: Projected P8 band (next year)")
+
         if band_base is not None:
             cc1, cc2 = st.columns(2, gap="large")
+
             with cc1:
                 st.markdown("**Before**")
                 st.write(f"Projected band: **{band_base[0]:.2f} to {band_base[1]:.2f}**")
+
             with cc2:
                 st.markdown("**After scenario**")
-                st.write(f"Projected band: **{band_scn[0]:.2f} to {band_scn[1]:.2f}**" if band_scn is not None else "Not available.")
-            st.caption(f"Band reflects ±{P8_MAE_BAND:.2f} around the forecast (approx model MAE).")
+
+                if band_scn is not None:
+                    st.write(f"Projected band: **{band_scn[0]:.2f} to {band_scn[1]:.2f}**")
+                else:
+                    st.write("Not available.")
+
+            st.caption(f"Band reflects ±{P8_MAE_BAND:.2f} around the forecast.")
+
         else:
-            st.write("Not available (delta model missing or missing lag).")
+            st.write("Not available. Delta model is missing, or the selected row has no valid lagged P8 value.")
 
     briefing = make_briefing_text(
         school_name=school_name,
@@ -1091,6 +1200,7 @@ with tab_overview:
         send_after=(float(send_after) if pd.notna(send_after) else None),
         primary_focus=primary_focus,
     )
+
     st.download_button(
         "Download leadership briefing (txt)",
         data=briefing,
@@ -1098,55 +1208,54 @@ with tab_overview:
         mime="text/plain"
     )
 
+
 with tab_actions:
-    """
-    Actions tab:
-    Converts technical model-driver themes into simple
-    user-facing action prompts for leadership discussion.
-    """
     st.markdown("## Recommended actions this term")
-    st.caption("Suggestions are based on what is most associated with this school’s forecast. Tailor using professional judgement.")
+    st.caption(
+        "Suggestions are based on what is most associated with this school’s forecast. "
+        "Tailor using professional judgement."
+    )
 
     themes = []
+
     for _, r in drivers.iterrows():
         t = theme_for_feature(str(r["feature"]))
+
         if t not in themes:
             themes.append(t)
+
         if len(themes) >= 3:
             break
 
     cols = st.columns(3, gap="large")
+
     for i, t in enumerate(themes):
         play = action_playbook(t)
+
         with cols[i]:
             with st.container(border=True):
-                st.markdown(f"### {i+1}. {t}")
+                st.markdown(f"### {i + 1}. {t}")
                 st.write(f"**Why this matters here:** {play['why']}")
                 st.write("**Suggested actions:**")
+
                 for a in play["actions"]:
                     st.write(f"• {a}")
+
                 st.caption(f"Likely owner: {play['owner']}")
 
 
-
 with tab_evidence:
-    """
-    Evidence tab:
-    Provides technical transparency for dissertation review,
-    including feature counts, top local drivers, panel rows,
-    and explicit caveats about scenario interpretation.
-    """
     with st.container(border=True):
-        st.markdown("### Evidence (optional)")
+        st.markdown("### Evidence")
         st.caption("For dissertation/examiner transparency and technical checks.")
         st.write(f"Underperformance model features: **{len(under_feats)}**")
-        st.write(f"Overperformance model features: **{len(joblib.load(OVER_FEATURES_PATH))}**")
+        st.write(f"Overperformance model features: **{len(over_feats)}**")
         st.write(f"Delta model available: **{'Yes' if delta_model is not None else 'No'}**")
 
-    with st.expander("Show top driver features (technical)"):
+    with st.expander("Show top driver features"):
         st.dataframe(drivers, use_container_width=True)
 
-    with st.expander("Show latest school rows (panel)"):
+    with st.expander("Show latest school rows"):
         st.dataframe(school_rows.tail(8), use_container_width=True)
 
     with st.expander("Show key notes"):
@@ -1154,8 +1263,9 @@ with tab_evidence:
         st.write("- Attendance/PTR sliders are capped to p05–p95 ranges to avoid unrealistic scenarios.")
         st.write("- Scenarios show model sensitivity, not guaranteed causality.")
 
+
 # ==========================================================
-# Outputs / Usage Summary
+# OUTPUTS / USAGE SUMMARY
 # ==========================================================
 #
 # This application provides:
