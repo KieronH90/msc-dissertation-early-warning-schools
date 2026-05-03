@@ -8,18 +8,18 @@
 # reviewing key model drivers, and testing plausible
 # what-if scenarios.
 #
-# Inputs:
-# - school_panel_final.parquet
-# - master_data_cache.pkl
-# - risk_xgb_classifier.joblib
-# - risk_model_features.joblib
-# - overperf_xgb_classifier.joblib
-# - overperf_model_features.joblib
-# - delta_xgb_model.joblib
-# - delta_model_features.joblib
+# Required inputs:
+# - data/processed/school_panel_final.parquet
+# - models/risk_xgb_classifier.joblib
+# - models/risk_model_features.joblib
+# - models/overperf_xgb_classifier.joblib
+# - models/overperf_model_features.joblib
+# - models/delta_xgb_model.joblib
+# - models/delta_model_features.joblib
 #
-# Stored in:
-# - data/processed/
+# Optional input:
+# - data/processed/master_data_cache.pkl
+#   Used only for richer school-name lookup if available.
 #
 # Outputs:
 # - Interactive dashboard interface
@@ -32,14 +32,9 @@
 # risk triage, and scenario testing.
 #
 # Reproducibility note:
-# The file paths in this script are currently configured for
-# the author’s local machine. These should be updated if the
-# project is run in a different environment.
-#
-# Important:
-# This script was developed on a local Windows environment.
-# Users reproducing the tool should replace absolute paths
-# with environment-specific paths or relative project paths.
+# This public repository version uses relative paths based on
+# the repository structure. It expects the app to be run from
+# the project repository containing data/, models/, and app/.
 #
 # Methodological note:
 # This tool is designed as a decision-support prototype rather
@@ -64,6 +59,8 @@
 import os
 import glob
 import pickle
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -103,27 +100,24 @@ import shap
 # -----------------------------
 # CONFIG
 # -----------------------------
-BASE_DIR = r"C:\Users\kiero\Documents\msc-dissertation\data"
-RAW_FOLDER = os.path.join(BASE_DIR, "raw")
-PROCESSED_FOLDER = os.path.join(BASE_DIR, "processed")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-PANEL_PATH = os.path.join(PROCESSED_FOLDER, "school_panel_final.parquet")
-MASTER_CACHE_PATH = os.path.join(PROCESSED_FOLDER, "master_data_cache.pkl")
+DATA_DIR = PROJECT_ROOT / "data" / "processed"
+MODEL_DIR = PROJECT_ROOT / "models"
+RAW_FOLDER = PROJECT_ROOT / "data" / "raw"
+PROCESSED_FOLDER = DATA_DIR
 
-UNDER_MODEL_PATH = os.path.join(PROCESSED_FOLDER, "risk_xgb_classifier.joblib")
-UNDER_FEATURES_PATH = os.path.join(PROCESSED_FOLDER, "risk_model_features.joblib")
+PANEL_PATH = DATA_DIR / "school_panel_final.parquet"
+MASTER_CACHE_PATH = DATA_DIR / "master_data_cache.pkl"
 
-OVER_MODEL_PATH = os.path.join(PROCESSED_FOLDER, "overperf_xgb_classifier.joblib")
-OVER_FEATURES_PATH = os.path.join(PROCESSED_FOLDER, "overperf_model_features.joblib")
+UNDER_MODEL_PATH = MODEL_DIR / "risk_xgb_classifier.joblib"
+UNDER_FEATURES_PATH = MODEL_DIR / "risk_model_features.joblib"
 
-DELTA_MODEL_PATH = os.path.join(PROCESSED_FOLDER, "delta_xgb_model.joblib")
-DELTA_FEATURES_PATH = os.path.join(PROCESSED_FOLDER, "delta_model_features.joblib")
+OVER_MODEL_PATH = MODEL_DIR / "overperf_xgb_classifier.joblib"
+OVER_FEATURES_PATH = MODEL_DIR / "overperf_model_features.joblib"
 
-GREEN_MAX = 0.40
-AMBER_MAX = 0.60
-P8_MAE_BAND = 0.21
-
-st.set_page_config(page_title="Trust School Priority Tool", page_icon="🧭", layout="wide")
+DELTA_MODEL_PATH = MODEL_DIR / "delta_xgb_model.joblib"
+DELTA_FEATURES_PATH = MODEL_DIR / "delta_model_features.joblib"
 
 # ==========================================================
 # Styling
@@ -220,11 +214,11 @@ def build_urn_name_lookup(panel_urns: np.ndarray) -> dict[int, str]:
     mapping: dict[int, str] = {}
 
     patterns = [
-        os.path.join(RAW_FOLDER, "*school_information*.csv"),
-        os.path.join(PROCESSED_FOLDER, "*school_information*.csv"),
-        os.path.join(RAW_FOLDER, "*spine*.csv"),
-        os.path.join(PROCESSED_FOLDER, "*spine*.csv"),
-    ]
+    str(RAW_FOLDER / "*school_information*.csv"),
+    str(PROCESSED_FOLDER / "*school_information*.csv"),
+    str(RAW_FOLDER / "*spine*.csv"),
+    str(PROCESSED_FOLDER / "*spine*.csv"),
+]
     files = []
     for p in patterns:
         files.extend(glob.glob(p))
